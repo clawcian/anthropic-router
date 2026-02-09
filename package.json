@@ -1,0 +1,41 @@
+{
+  "name": "anthropic-router",
+  "version": "0.1.0",
+  "description": "OpenClaw plugin to route requests to the cheapest Anthropic model that can handle them",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "openclaw",
+    "plugin",
+    "anthropic",
+    "claude",
+    "router",
+    "llm",
+    "ai"
+  ],
+  "author": "Lucian Hymer",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lucianHymer/anthropic-router.git"
+  },
+  "files": [
+    "dist",
+    "openclaw.plugin.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.7.0"
+  }
+}
