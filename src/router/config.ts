@@ -118,9 +118,9 @@ export const DEFAULT_ROUTING_CONFIG: RoutingConfig = {
   },
 
   tiers: {
-    SIMPLE: "anthropic/claude-3-5-haiku-20241022",
-    MEDIUM: "anthropic/claude-sonnet-4-20250514",
-    COMPLEX: "anthropic/claude-opus-4-20250514",
+    SIMPLE: "haiku",
+    MEDIUM: "sonnet",
+    COMPLEX: "opus",
   },
 
   overrides: {

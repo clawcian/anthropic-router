@@ -8,9 +8,9 @@ An [OpenClaw](https://github.com/openclaw/openclaw) plugin that automatically ro
 
 | Model | Cost/M tokens | Relative |
 |-------|---------------|----------|
-| claude-3-5-haiku | $1.00 | 1x |
-| claude-sonnet-4 | $3.00 | 3x |
-| claude-opus-4 | $15.00 | 15x |
+| haiku | $1.00 | 1x |
+| sonnet | $3.00 | 3x |
+| opus | $15.00 | 15x |
 
 Most requests don't need Opus. This plugin analyzes each prompt and picks the cheapest model that can handle it, saving ~74% on a typical workload.
 
@@ -43,9 +43,9 @@ The router uses a **14-dimension weighted scoring system** to classify prompt co
 
 Weighted sum → sigmoid confidence calibration → tier selection:
 
-- **SIMPLE** (score < 0.0) → Haiku
-- **MEDIUM** (0.0 ≤ score < 0.15) → Sonnet
-- **COMPLEX** (score ≥ 0.15) → Opus
+- **SIMPLE** (score < 0.0) → haiku
+- **MEDIUM** (0.0 ≤ score < 0.15) → sonnet
+- **COMPLEX** (score ≥ 0.15) → opus
 
 Ambiguous prompts (confidence < 0.7) default to Sonnet.
 
@@ -59,9 +59,9 @@ plugins:
     config:
       # Override tier → model mapping
       tiers:
-        SIMPLE: "anthropic/claude-3-5-haiku-20241022"
-        MEDIUM: "anthropic/claude-sonnet-4-20250514"
-        COMPLEX: "anthropic/claude-opus-4-20250514"
+        SIMPLE: "haiku"
+        MEDIUM: "sonnet"
+        COMPLEX: "opus"
       
       # Adjust scoring weights
       scoring:
@@ -83,9 +83,9 @@ Based on typical traffic distribution:
 
 | Tier | % of Traffic | Model | Cost/M |
 |------|--------------|-------|--------|
-| SIMPLE | ~45% | Haiku | $1.00 |
-| MEDIUM | ~40% | Sonnet | $3.00 |
-| COMPLEX | ~15% | Opus | $15.00 |
+| SIMPLE | ~45% | haiku | $1.00 |
+| MEDIUM | ~40% | sonnet | $3.00 |
+| COMPLEX | ~15% | opus | $15.00 |
 | **Blended** | | | **$3.90/M** |
 
 Compared to $15/M always-Opus = **74% savings**
