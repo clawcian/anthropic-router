@@ -6,6 +6,28 @@
 
 export type Tier = "SIMPLE" | "MEDIUM" | "COMPLEX";
 
+const TIER_ORDER: Record<Tier, number> = { SIMPLE: 0, MEDIUM: 1, COMPLEX: 2 };
+
+export function maxTier(a: Tier, b: Tier): Tier {
+  return TIER_ORDER[a] >= TIER_ORDER[b] ? a : b;
+}
+
+export type DimensionName =
+  | "tokenCount"
+  | "codePresence"
+  | "reasoningMarkers"
+  | "technicalTerms"
+  | "creativeMarkers"
+  | "simpleIndicators"
+  | "multiStepPatterns"
+  | "questionComplexity"
+  | "imperativeVerbs"
+  | "constraintCount"
+  | "outputFormat"
+  | "referenceComplexity"
+  | "negationComplexity"
+  | "domainSpecificity";
+
 export type ScoringResult = {
   score: number;
   tier: Tier | null;
@@ -19,6 +41,8 @@ export type RoutingDecision = {
   confidence: number;
   method: "rules";
   reasoning: string;
+  signals: string[];
+  estimatedTokens: number;
 };
 
 export type ScoringConfig = {
@@ -34,7 +58,7 @@ export type ScoringConfig = {
   referenceKeywords: string[];
   negationKeywords: string[];
   domainSpecificKeywords: string[];
-  dimensionWeights: Record<string, number>;
+  dimensionWeights: Record<DimensionName, number>;
   tierBoundaries: {
     simpleMedium: number;
     mediumComplex: number;

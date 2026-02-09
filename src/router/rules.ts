@@ -7,9 +7,9 @@
  * Adapted from ClawRouter (MIT licensed, BlockRunAI)
  */
 
-import type { Tier, ScoringResult, ScoringConfig } from "./types.js";
+import type { Tier, DimensionName, ScoringResult, ScoringConfig } from "./types.js";
 
-type DimensionScore = { name: string; score: number; signal: string | null };
+type DimensionScore = { name: DimensionName; score: number; signal: string | null };
 
 // ─── Dimension Scorers ───
 
@@ -29,7 +29,7 @@ function scoreTokenCount(
 function scoreKeywordMatch(
   text: string,
   keywords: string[],
-  name: string,
+  name: DimensionName,
   signalLabel: string,
   thresholds: { low: number; high: number },
   scores: { none: number; low: number; high: number },
@@ -178,7 +178,9 @@ export function classifyByRules(
   ];
 
   // Collect signals
-  const signals = dimensions.filter((d) => d.signal !== null).map((d) => d.signal!);
+  const signals = dimensions
+    .map((d) => d.signal)
+    .filter((s): s is string => s !== null);
 
   // Compute weighted score
   const weights = config.dimensionWeights;

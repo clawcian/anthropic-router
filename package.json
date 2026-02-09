@@ -1,23 +1,25 @@
 {
   "name": "anthropic-router",
-  "version": "0.1.0",
-  "description": "OpenClaw plugin to route requests to the cheapest Anthropic model that can handle them",
+  "version": "0.2.0",
+  "description": "Proxy server that routes requests to the cheapest Anthropic model based on complexity",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
+    "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "clean": "rm -rf dist"
   },
   "keywords": [
-    "openclaw",
-    "plugin",
     "anthropic",
     "claude",
     "router",
+    "proxy",
     "llm",
     "ai"
   ],
@@ -29,13 +31,20 @@
   },
   "files": [
     "dist",
-    "openclaw.plugin.json",
     "README.md",
     "LICENSE"
   ],
+  "dependencies": {
+    "@hono/node-server": "^1.0.0",
+    "hono": "^4.0.0"
+  },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.55.0",
+    "@typescript-eslint/parser": "^8.55.0",
+    "eslint": "^9.39.2",
     "tsup": "^8.0.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
   }
 }

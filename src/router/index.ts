@@ -41,6 +41,8 @@ export function route(
       confidence: 0.95,
       method: "rules",
       reasoning: `Input exceeds ${config.overrides.maxTokensForceComplex} tokens`,
+      signals: ["large-context"],
+      estimatedTokens,
     };
   }
 
@@ -67,8 +69,11 @@ export function route(
     confidence,
     method: "rules",
     reasoning,
+    signals: ruleResult.signals,
+    estimatedTokens,
   };
 }
 
 export { DEFAULT_ROUTING_CONFIG } from "./config.js";
-export type { RoutingDecision, Tier, RoutingConfig, ScoringConfig, TierConfig } from "./types.js";
+export { maxTier } from "./types.js";
+export type { RoutingDecision, Tier, DimensionName, RoutingConfig, ScoringConfig, TierConfig } from "./types.js";
