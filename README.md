@@ -29,7 +29,7 @@ Done. All requests now route through the cheapest capable model.
 
 ## How It Works
 
-A local proxy on `127.0.0.1:8403` intercepts requests, scores prompt complexity across 14 weighted dimensions, rewrites the `model` field, and forwards to `api.anthropic.com`. Responses stream back zero-copy.
+A local proxy on `127.0.0.1:8403` intercepts requests, scores prompt complexity across 14 weighted dimensions, rewrites the `model` field, and calls the Anthropic API via the official SDK. Responses stream back zero-copy.
 
 | Score Range | Tier | Model | When |
 |-------------|------|-------|------|
@@ -39,7 +39,7 @@ A local proxy on `127.0.0.1:8403` intercepts requests, scores prompt complexity 
 
 Ambiguous prompts (confidence < 0.7) default to sonnet.
 
-Your Anthropic credentials are forwarded per-request from your OpenClaw session. No API keys stored in the plugin.
+Authentication is handled by the Anthropic SDK, which reads credentials from your home directory. No API keys stored or forwarded by the plugin.
 
 ## Configuration
 

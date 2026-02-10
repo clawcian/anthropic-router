@@ -1,7 +1,40 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import Anthropic from "@anthropic-ai/sdk";
 import { buildConfig, createApp } from "./server.js";
 import { DEFAULT_ROUTING_CONFIG } from "./router/index.js";
 import type { ProxyConfig } from "./server.js";
+
+/**
+ * Create a mock Anthropic client for testing.
+ * For 2xx: .asResponse() resolves to a raw Response (matching SDK zero-copy pattern).
+ * For 4xx/5xx: .asResponse() rejects with APIError (matching real SDK behavior).
+ */
+function createMockClient(responseBody: unknown, status = 200, contentType = "application/json") {
+  const mockCreate = vi.fn().mockReturnValue({
+    asResponse: () => {
+      if (status >= 400) {
+        // SDK throws APIError for non-2xx — reconstruct the same shape
+        const err = new Anthropic.APIError(
+          status,
+          { error: responseBody },
+          undefined,
+          new Headers({ "Content-Type": contentType }),
+        );
+        return Promise.reject(err);
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify(responseBody), {
+          status,
+          headers: { "Content-Type": contentType },
+        }),
+      );
+    },
+  });
+  return {
+    client: { messages: { create: mockCreate } } as unknown as Anthropic,
+    mockCreate,
+  };
+}
 
 describe("buildConfig", () => {
   it("returns a deep clone of defaults when no overrides", () => {
@@ -86,9 +119,12 @@ describe("createApp", () => {
     logPath: "/tmp/test-routing.jsonl",
   };
 
+  // Use a shared mock client for endpoints that don't hit the SDK
+  const { client: dummyClient } = createMockClient({});
+
   describe("GET /health", () => {
     it("returns 200 with ok status and plugin info", async () => {
-      const app = createApp(testConfig);
+      const app = createApp(testConfig, dummyClient);
       const res = await app.request("/health");
       expect(res.status).toBe(200);
       const body = await res.json();
@@ -100,7 +136,7 @@ describe("createApp", () => {
 
   describe("POST /test", () => {
     it("scores a prompt and returns routing decision", async () => {
-      const app = createApp(testConfig);
+      const app = createApp(testConfig, dummyClient);
       const res = await app.request("/test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -117,7 +153,7 @@ describe("createApp", () => {
     });
 
     it("resolves tier model names to full API IDs", async () => {
-      const app = createApp(testConfig);
+      const app = createApp(testConfig, dummyClient);
       const res = await app.request("/test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -128,7 +164,7 @@ describe("createApp", () => {
     });
 
     it("accepts optional system prompt", async () => {
-      const app = createApp(testConfig);
+      const app = createApp(testConfig, dummyClient);
       const res = await app.request("/test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -144,7 +180,8 @@ describe("createApp", () => {
 
   describe("POST /v1/messages", () => {
     it("rejects invalid JSON", async () => {
-      const app = createApp(testConfig);
+      const { client } = createMockClient({});
+      const app = createApp(testConfig, client);
       const res = await app.request("/v1/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -156,7 +193,8 @@ describe("createApp", () => {
     });
 
     it("rejects missing messages array", async () => {
-      const app = createApp(testConfig);
+      const { client } = createMockClient({});
+      const app = createApp(testConfig, client);
       const res = await app.request("/v1/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -167,7 +205,8 @@ describe("createApp", () => {
     });
 
     it("rejects messages that is not an array", async () => {
-      const app = createApp(testConfig);
+      const { client } = createMockClient({});
+      const app = createApp(testConfig, client);
       const res = await app.request("/v1/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -176,49 +215,137 @@ describe("createApp", () => {
       expect(res.status).toBe(400);
     });
 
-    it("returns 401 when x-api-key header is missing and no fallback key", async () => {
-      const app = createApp(testConfig); // no anthropicApiKey set
+    it("forwards request to Anthropic SDK with rewritten model", async () => {
+      const mockResponse = { id: "msg_123", content: [{ type: "text", text: "hi" }] };
+      const { client, mockCreate } = createMockClient(mockResponse);
+      const app = createApp(testConfig, client);
       const res = await app.request("/v1/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           messages: [{ role: "user", content: "hello" }],
+          max_tokens: 1024,
         }),
       });
-      expect(res.status).toBe(401);
+      expect(res.status).toBe(200);
       const body = await res.json();
-      expect(body.error.type).toBe("authentication_error");
-      expect(body.error.message).toContain("x-api-key");
+      expect(body.id).toBe("msg_123");
+
+      // Verify SDK was called with a rewritten model (not the original)
+      expect(mockCreate).toHaveBeenCalledOnce();
+      const sdkParams = mockCreate.mock.calls[0][0];
+      expect(sdkParams.model).toMatch(/^claude-/);
+      expect(sdkParams.messages).toEqual([{ role: "user", content: "hello" }]);
     });
 
-    it("does not return proxy auth error when fallback anthropicApiKey is set", async () => {
-      // When anthropicApiKey is configured, the proxy should NOT return its own
-      // "Missing x-api-key" error — it should attempt the upstream call instead.
-      // The upstream call may fail (invalid key), but it won't be OUR auth error.
-      const appWithKey = createApp({
-        ...testConfig,
-        anthropicApiKey: "test-fallback-key",
-      });
-      const res = await appWithKey.request("/v1/messages", {
+    it("adds routing transparency headers", async () => {
+      const { client } = createMockClient({ id: "msg_123" });
+      const app = createApp(testConfig, client);
+      const res = await app.request("/v1/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           messages: [{ role: "user", content: "hello" }],
+          max_tokens: 1024,
         }),
       });
+      expect(res.headers.get("X-Router-Tier")).toBeTruthy();
+      expect(res.headers.get("X-Router-Model")).toMatch(/^claude-/);
+      expect(res.headers.get("X-Router-Confidence")).toBeTruthy();
+    });
+
+    it("adds SSE headers for streaming requests", async () => {
+      const { client } = createMockClient(
+        { type: "message_start" },
+        200,
+        "text/event-stream",
+      );
+      const app = createApp(testConfig, client);
+      const res = await app.request("/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [{ role: "user", content: "hello" }],
+          max_tokens: 1024,
+          stream: true,
+        }),
+      });
+      expect(res.headers.get("Cache-Control")).toBe("no-cache, no-transform");
+      expect(res.headers.get("X-Accel-Buffering")).toBe("no");
+    });
+
+    it("passes through upstream error status codes from SDK APIError", async () => {
+      const { client } = createMockClient(
+        { type: "rate_limit", message: "too many requests" },
+        429,
+      );
+      const app = createApp(testConfig, client);
+      const res = await app.request("/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [{ role: "user", content: "hello" }],
+          max_tokens: 1024,
+        }),
+      });
+      expect(res.status).toBe(429);
       const body = await res.json();
-      // If we get a 401, it should be from Anthropic upstream (not our proxy).
-      // Our proxy error says "Missing x-api-key header. Ensure you are logged into Claude Code."
-      // Anthropic upstream says "invalid x-api-key" — different message.
-      if (res.status === 401) {
-        expect(body.error?.message ?? "").not.toContain("Missing x-api-key header");
-      }
+      expect(body.error.type).toBe("rate_limit");
+    });
+
+    it("passes through 401 auth errors from SDK", async () => {
+      const { client } = createMockClient(
+        { type: "authentication_error", message: "invalid api key" },
+        401,
+      );
+      const app = createApp(testConfig, client);
+      const res = await app.request("/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [{ role: "user", content: "hello" }],
+          max_tokens: 1024,
+        }),
+      });
+      expect(res.status).toBe(401);
+    });
+
+    it("uses forceModel when configured", async () => {
+      const { client, mockCreate } = createMockClient({ id: "msg_forced" });
+      const app = createApp({ ...testConfig, forceModel: "claude-opus-4-6" }, client);
+      const res = await app.request("/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [{ role: "user", content: "hello" }],
+          max_tokens: 1024,
+        }),
+      });
+      expect(res.status).toBe(200);
+      const sdkParams = mockCreate.mock.calls[0][0];
+      expect(sdkParams.model).toBe("claude-opus-4-6");
+    });
+
+    it("allowlists known fields only", async () => {
+      const { client, mockCreate } = createMockClient({ id: "msg_123" });
+      const app = createApp(testConfig, client);
+      await app.request("/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [{ role: "user", content: "hello" }],
+          max_tokens: 1024,
+          evil_field: "should be dropped",
+        }),
+      });
+      const sdkParams = mockCreate.mock.calls[0][0];
+      expect(sdkParams).not.toHaveProperty("evil_field");
     });
   });
 
   describe("GET /stats", () => {
     it("returns empty stats on fresh app instance", async () => {
-      const app = createApp(testConfig);
+      const app = createApp(testConfig, dummyClient);
       const res = await app.request("/stats");
       expect(res.status).toBe(200);
       const body = await res.json();
@@ -232,7 +359,8 @@ describe("createApp", () => {
 
   describe("error responses", () => {
     it("uses consistent error envelope structure", async () => {
-      const app = createApp(testConfig);
+      const { client } = createMockClient({});
+      const app = createApp(testConfig, client);
       const res = await app.request("/v1/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -246,7 +374,8 @@ describe("createApp", () => {
     });
 
     it("does not leak internal config in error responses", async () => {
-      const app = createApp(testConfig);
+      const { client } = createMockClient({});
+      const app = createApp(testConfig, client);
       const res = await app.request("/v1/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json" },

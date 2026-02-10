@@ -34,7 +34,7 @@ export const anthropicRouterProvider: ProviderPlugin = {
     return buildProviderModels(activeProxyBaseUrl);
   },
 
-  // No auth required — the proxy forwards per-request x-api-key from
-  // OpenClaw's session. Users must be logged into Claude Code.
+  // No auth required at the provider level — the Anthropic SDK handles
+  // authentication from the user's home directory.
   auth: [],
 };

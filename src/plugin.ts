@@ -27,7 +27,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 const DEFAULT_PORT = 8403;
-const SESSION_PASSTHROUGH_KEY = "session-passthrough";
+/** Dummy API key for OpenClaw's provider config format. The proxy itself doesn't use it — auth is handled by the Anthropic SDK. */
+const PLACEHOLDER_API_KEY = "session-passthrough";
 
 /** Shape of ~/.openclaw/openclaw.json (relevant fields only). */
 type OpenClawConfig = {
@@ -50,6 +51,17 @@ type AuthProfileStore = {
  */
 function isCompletionMode(): boolean {
   return process.argv.some((arg, i) => arg === "completion" && i >= 1 && i <= 3);
+}
+
+/**
+ * Detect if we're running during `openclaw plugins install`.
+ * During install, the plugin is loaded for validation but we must NOT start
+ * the proxy server — its HTTP listener keeps the event loop alive and the
+ * install process hangs indefinitely.
+ */
+function isInstallMode(): boolean {
+  const args = process.argv.slice(1).join(" ");
+  return /plugins?\s+install/i.test(args);
 }
 
 /**
@@ -116,7 +128,7 @@ function injectModelsConfig(
     const providerConfig: ModelProviderConfig = {
       baseUrl: expectedBaseUrl,
       api: "anthropic-messages",
-      apiKey: SESSION_PASSTHROUGH_KEY,
+      apiKey: PLACEHOLDER_API_KEY,
       models: OPENCLAW_MODELS,
     };
 
@@ -139,7 +151,8 @@ function injectModelsConfig(
 
 /**
  * Inject auth profile placeholder into agent auth stores.
- * OpenClaw may require auth entries to exist for the provider.
+ * OpenClaw requires auth entries to exist for the provider to be valid.
+ * The proxy itself does not use these — auth is handled by the Anthropic SDK.
  */
 function injectAuthProfile(logger: { info: (msg: string) => void; warn: (msg: string) => void }): void {
   const agentsDir = join(homedir(), ".openclaw", "agents");
@@ -196,7 +209,7 @@ function injectAuthProfile(logger: { info: (msg: string) => void; warn: (msg: st
       store.profiles[profileKey] = {
         type: "api_key",
         provider: "anthropic-router",
-        key: SESSION_PASSTHROUGH_KEY,
+        key: PLACEHOLDER_API_KEY,
       };
 
       try {
@@ -374,11 +387,13 @@ const plugin: OpenClawPluginDefinition = {
     "Smart routing — automatically selects cheapest capable Anthropic model per request",
 
   register(api: OpenClawPluginApi) {
-    // Skip heavy initialization in completion mode
+    // Skip heavy initialization in completion/install mode
     if (isCompletionMode()) {
       api.registerProvider(anthropicRouterProvider);
       return;
     }
+
+    const installMode = isInstallMode();
 
     const port = getPort(api.pluginConfig);
 
@@ -401,7 +416,7 @@ const plugin: OpenClawPluginDefinition = {
     api.config.models.providers["anthropic-router"] = {
       baseUrl: `http://127.0.0.1:${port}`,
       api: "anthropic-messages",
-      apiKey: SESSION_PASSTHROUGH_KEY,
+      apiKey: PLACEHOLDER_API_KEY,
       models: OPENCLAW_MODELS,
     };
 
@@ -445,12 +460,15 @@ const plugin: OpenClawPluginDefinition = {
 
     api.logger.info("Registered /router stats and /router test commands");
 
-    // Start proxy in background (fire-and-forget)
-    startProxyServer(port, api).catch((err) => {
-      api.logger.error(
-        `Failed to start proxy: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    });
+    // Start proxy in background (fire-and-forget) — but NOT during install,
+    // where the HTTP listener would keep the event loop alive and hang the process.
+    if (!installMode) {
+      startProxyServer(port, api).catch((err) => {
+        api.logger.error(
+          `Failed to start proxy: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+    }
   },
 };
 

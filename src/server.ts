@@ -9,6 +9,7 @@
  * https://github.com/BlockRunAI/ClawRouter
  */
 
+import Anthropic from "@anthropic-ai/sdk";
 import { Hono } from "hono";
 import { route, DEFAULT_ROUTING_CONFIG } from "./router/index.js";
 import type { RoutingConfig, Tier } from "./router/types.js";
@@ -30,6 +31,9 @@ export type AnthropicMessagesRequest = {
   top_k?: number;
   stop_sequences?: string[];
   metadata?: { user_id?: string };
+  tools?: unknown[];
+  tool_choice?: unknown;
+  thinking?: unknown;
 };
 
 // Map short tier model names to full Anthropic API model IDs
@@ -41,8 +45,6 @@ const TIER_TO_MODEL: Record<string, string> = {
 
 export type ProxyConfig = {
   port: number;
-  /** Fallback API key for standalone mode. In plugin mode, extracted per-request from x-api-key header. */
-  anthropicApiKey?: string;
   routingConfig: RoutingConfig;
   logEnabled: boolean;
   logPath: string;
@@ -150,10 +152,13 @@ function buildAllowlistedBody(
   if (raw.top_k !== undefined) body.top_k = raw.top_k;
   if (raw.stop_sequences !== undefined) body.stop_sequences = raw.stop_sequences;
   if (raw.metadata !== undefined) body.metadata = raw.metadata;
+  if (raw.tools !== undefined) body.tools = raw.tools;
+  if (raw.tool_choice !== undefined) body.tool_choice = raw.tool_choice;
+  if (raw.thinking !== undefined) body.thinking = raw.thinking;
   return body;
 }
 
-type ErrorType = "invalid_request" | "authentication_error" | "internal_error";
+type ErrorType = "invalid_request" | "internal_error";
 
 /** Consistent error envelope used across all endpoints. */
 function errorResponse(type: ErrorType, message: string) {
@@ -166,8 +171,10 @@ function errorResponse(type: ErrorType, message: string) {
 
 /**
  * Create the Hono proxy application.
+ * Accepts an optional Anthropic client for dependency injection (tests).
  */
-export function createApp(config: ProxyConfig): Hono {
+export function createApp(config: ProxyConfig, client?: Anthropic): Hono {
+  const anthropic = client ?? new Anthropic({ maxRetries: 0 });
   const app = new Hono();
 
   // In-memory routing stats (O(1) per request, no file reads)
@@ -270,32 +277,13 @@ export function createApp(config: ProxyConfig): Hono {
         }
       }
 
-      // Rewrite model and forward to Anthropic
+      // Rewrite model and forward via Anthropic SDK
+      // Auth is handled by the SDK (reads from user's home directory)
       body.model = model;
 
-      // Per-request credential passthrough: extract x-api-key from incoming request.
-      // In plugin mode, OpenClaw forwards the user's Anthropic credentials.
-      // Falls back to config.anthropicApiKey for standalone mode.
-      const apiKey = c.req.header("x-api-key") ?? config.anthropicApiKey;
-      if (!apiKey) {
-        return c.json(
-          errorResponse(
-            "authentication_error",
-            "Missing x-api-key header. Ensure you are logged into Claude Code.",
-          ),
-          401,
-        );
-      }
-
-      const upstream = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": apiKey,
-          "anthropic-version": "2023-06-01",
-        },
-        body: JSON.stringify(body),
-      });
+      const upstream = await anthropic.messages
+        .create(body as Anthropic.MessageCreateParams)
+        .asResponse();
 
       // -- #006: Routing transparency headers --
       const responseHeaders: Record<string, string> = {
@@ -323,7 +311,13 @@ export function createApp(config: ProxyConfig): Hono {
         headers: responseHeaders,
       });
     } catch (err) {
-      // -- #007: No internal config in error response --
+      // Reconstruct upstream error responses from SDK APIError
+      if (err instanceof Anthropic.APIError && err.status) {
+        return c.json(
+          err.error ?? errorResponse("internal_error", err.message),
+          err.status as 400,
+        );
+      }
       console.error("Routing failed:", err);
       return c.json(
         errorResponse("internal_error", "Internal routing error"),
