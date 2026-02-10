@@ -10,10 +10,9 @@
  */
 
 import { Hono } from "hono";
-import { route, DEFAULT_ROUTING_CONFIG, maxTier } from "./router/index.js";
+import { route, DEFAULT_ROUTING_CONFIG } from "./router/index.js";
 import type { RoutingConfig, Tier } from "./router/types.js";
 import { logDecision } from "./logger.js";
-import { readFile } from "node:fs/promises";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -33,12 +32,6 @@ export type AnthropicMessagesRequest = {
   metadata?: { user_id?: string };
 };
 
-/** Max length for client-provided message IDs (prevents memory abuse). */
-const MAX_MESSAGE_ID_LENGTH = 256;
-
-/** Max allowed max_tokens value to prevent cost abuse. */
-const MAX_ALLOWED_TOKENS = 16384;
-
 // Map short tier model names to full Anthropic API model IDs
 const TIER_TO_MODEL: Record<string, string> = {
   haiku: "claude-haiku-4-5-20251001",
@@ -48,13 +41,12 @@ const TIER_TO_MODEL: Record<string, string> = {
 
 export type ProxyConfig = {
   port: number;
-  anthropicApiKey: string;
-  proxySecret: string;
+  /** Fallback API key for standalone mode. In plugin mode, extracted per-request from x-api-key header. */
+  anthropicApiKey?: string;
   routingConfig: RoutingConfig;
   logEnabled: boolean;
   logPath: string;
   forceModel?: string;
-  maxAllowedTokens?: number;
 };
 
 // ---------------------------------------------------------------------------
@@ -145,7 +137,6 @@ function resolveModelId(tierModel: string): string {
  */
 function buildAllowlistedBody(
   raw: AnthropicMessagesRequest,
-  maxTokens: number,
 ): AnthropicMessagesRequest {
   const body: AnthropicMessagesRequest = {
     messages: raw.messages,
@@ -153,23 +144,19 @@ function buildAllowlistedBody(
   if (raw.model !== undefined) body.model = raw.model;
   if (raw.system !== undefined) body.system = raw.system;
   if (raw.stream !== undefined) body.stream = raw.stream;
-  if (raw.max_tokens !== undefined) {
-    body.max_tokens = Math.min(raw.max_tokens, maxTokens);
-  }
+  if (raw.max_tokens !== undefined) body.max_tokens = raw.max_tokens;
   if (raw.temperature !== undefined) body.temperature = raw.temperature;
   if (raw.top_p !== undefined) body.top_p = raw.top_p;
   if (raw.top_k !== undefined) body.top_k = raw.top_k;
   if (raw.stop_sequences !== undefined) body.stop_sequences = raw.stop_sequences;
+  if (raw.metadata !== undefined) body.metadata = raw.metadata;
   return body;
 }
 
-/** Truncate a message ID to prevent memory abuse. */
-function safeMessageId(id: string): string {
-  return id.slice(0, MAX_MESSAGE_ID_LENGTH);
-}
+type ErrorType = "invalid_request" | "authentication_error" | "internal_error";
 
 /** Consistent error envelope used across all endpoints. */
-function errorResponse(type: string, message: string) {
+function errorResponse(type: ErrorType, message: string) {
   return { error: { type, message } };
 }
 
@@ -182,44 +169,28 @@ function errorResponse(type: string, message: string) {
  */
 export function createApp(config: ProxyConfig): Hono {
   const app = new Hono();
-  const maxTokensCap = config.maxAllowedTokens ?? MAX_ALLOWED_TOKENS;
 
-  // -- #004: messageTiers scoped per app instance --
-  const messageTiers = new Map<string, Tier>();
-  const MAX_TRACKED = 1000;
+  // In-memory routing stats (O(1) per request, no file reads)
+  const stats = {
+    totalRequests: 0,
+    tierCounts: {} as Record<string, number>,
+    modelCounts: {} as Record<string, number>,
+    totalTokens: 0,
+    totalConfidence: 0,
+  };
 
-  function trackTier(id: string, tier: Tier): void {
-    if (messageTiers.size >= MAX_TRACKED) {
-      const first = messageTiers.keys().next().value;
-      if (first !== undefined) messageTiers.delete(first);
-    }
-    messageTiers.set(id, tier);
+  function recordStats(tier: string, model: string, tokens: number, confidence: number): void {
+    stats.totalRequests++;
+    stats.tierCounts[tier] = (stats.tierCounts[tier] ?? 0) + 1;
+    stats.modelCounts[model] = (stats.modelCounts[model] ?? 0) + 1;
+    stats.totalTokens += tokens;
+    stats.totalConfidence += confidence;
   }
 
-  // -- #001: Bearer token auth middleware --
-  app.use("*", async (c, next) => {
-    // /health is exempt for load balancer probes
-    if (c.req.path === "/health") return next();
-
-    const authHeader = c.req.header("authorization");
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return c.json(
-        errorResponse("authentication_error", "Missing or invalid Authorization header"),
-        401,
-      );
-    }
-    const token = authHeader.slice(7);
-    if (token !== config.proxySecret) {
-      return c.json(
-        errorResponse("authentication_error", "Invalid bearer token"),
-        401,
-      );
-    }
-    return next();
-  });
-
-  // -- Health check (exempt from auth) --
-  app.get("/health", (c) => c.json({ status: "ok" }));
+  // -- Health check --
+  app.get("/health", (c) =>
+    c.json({ status: "ok", plugin: "anthropic-router", port: config.port }),
+  );
 
   // -- Test endpoint — score a prompt without forwarding --
   app.post("/test", async (c) => {
@@ -233,55 +204,19 @@ export function createApp(config: ProxyConfig): Hono {
     });
   });
 
-  // -- #005: Stats endpoint — async file read --
-  app.get("/stats", async (c) => {
-    if (!config.logEnabled) {
-      return c.json(
-        errorResponse("invalid_request", "Logging is disabled"),
-        400,
-      );
-    }
-
-    try {
-      const raw = await readFile(config.logPath, "utf-8");
-      const lines = raw.trim().split("\n").filter(Boolean);
-
-      const tierCounts: Record<string, number> = {};
-      const modelCounts: Record<string, number> = {};
-      let totalTokens = 0;
-      let totalConfidence = 0;
-      let count = 0;
-
-      for (const line of lines) {
-        try {
-          const entry = JSON.parse(line);
-          tierCounts[entry.tier] = (tierCounts[entry.tier] ?? 0) + 1;
-          modelCounts[entry.model] = (modelCounts[entry.model] ?? 0) + 1;
-          totalTokens += entry.tokens ?? 0;
-          totalConfidence += entry.confidence ?? 0;
-          count++;
-        } catch {
-          // Skip corrupt lines
-        }
-      }
-
-      return c.json({
-        totalRequests: count,
-        tierDistribution: tierCounts,
-        modelDistribution: modelCounts,
-        averageTokens: count > 0 ? Math.round(totalTokens / count) : 0,
-        averageConfidence:
-          count > 0 ? Math.round((totalConfidence / count) * 100) / 100 : 0,
-      });
-    } catch {
-      return c.json({
-        totalRequests: 0,
-        tierDistribution: {},
-        modelDistribution: {},
-        averageTokens: 0,
-        averageConfidence: 0,
-      });
-    }
+  // -- Stats endpoint — in-memory accumulators (O(1), no file reads) --
+  app.get("/stats", (c) => {
+    return c.json({
+      totalRequests: stats.totalRequests,
+      tierDistribution: stats.tierCounts,
+      modelDistribution: stats.modelCounts,
+      averageTokens: stats.totalRequests > 0
+        ? Math.round(stats.totalTokens / stats.totalRequests)
+        : 0,
+      averageConfidence: stats.totalRequests > 0
+        ? Math.round((stats.totalConfidence / stats.totalRequests) * 100) / 100
+        : 0,
+    });
   });
 
   // -- Main proxy endpoint — Anthropic Messages API format --
@@ -305,12 +240,10 @@ export function createApp(config: ProxyConfig): Hono {
 
     try {
       // Build allowlisted body (#002)
-      const body = buildAllowlistedBody(rawBody, maxTokensCap);
+      const body = buildAllowlistedBody(rawBody);
 
       // Extract prompt text for scoring
-      const lastUserMessage = body.messages
-        .filter((m) => m.role === "user")
-        .pop();
+      const lastUserMessage = body.messages.findLast((m) => m.role === "user");
       const promptText = extractText(lastUserMessage?.content);
       const systemText =
         typeof body.system === "string" ? body.system : "";
@@ -319,8 +252,6 @@ export function createApp(config: ProxyConfig): Hono {
       let model: string;
       let tier: Tier | undefined;
       let confidence: number | undefined;
-      let isReply = false;
-      let repliedTier: Tier | undefined;
 
       if (config.forceModel) {
         model = config.forceModel;
@@ -330,49 +261,41 @@ export function createApp(config: ProxyConfig): Hono {
         });
         tier = decision.tier;
         confidence = decision.confidence;
-
-        // Reply-aware routing: "only up" rule (#008: truncate IDs)
-        const replyToRaw =
-          c.req.header("x-reply-to") ?? (rawBody as Record<string, unknown>).reply_to;
-        if (replyToRaw && typeof replyToRaw === "string") {
-          const replyTo = safeMessageId(replyToRaw);
-          const previousTier = messageTiers.get(replyTo);
-          if (previousTier) {
-            isReply = true;
-            repliedTier = previousTier;
-            tier = maxTier(previousTier, tier);
-          }
-        }
-
         model = resolveModelId(config.routingConfig.tiers[tier]);
 
+        recordStats(tier, model, decision.estimatedTokens, decision.confidence);
+
         if (config.logEnabled) {
-          logDecision(decision, promptText, config.logPath, {
-            isReply,
-            repliedTier,
-          });
+          logDecision(decision, promptText, config.logPath);
         }
       }
 
       // Rewrite model and forward to Anthropic
       body.model = model;
 
+      // Per-request credential passthrough: extract x-api-key from incoming request.
+      // In plugin mode, OpenClaw forwards the user's Anthropic credentials.
+      // Falls back to config.anthropicApiKey for standalone mode.
+      const apiKey = c.req.header("x-api-key") ?? config.anthropicApiKey;
+      if (!apiKey) {
+        return c.json(
+          errorResponse(
+            "authentication_error",
+            "Missing x-api-key header. Ensure you are logged into Claude Code.",
+          ),
+          401,
+        );
+      }
+
       const upstream = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-api-key": config.anthropicApiKey,
+          "x-api-key": apiKey,
           "anthropic-version": "2023-06-01",
         },
         body: JSON.stringify(body),
       });
-
-      // Track message tier for reply routing (#008: truncate IDs)
-      const messageIdRaw =
-        c.req.header("x-message-id") ?? (rawBody as Record<string, unknown>).message_id;
-      if (messageIdRaw && typeof messageIdRaw === "string" && tier) {
-        trackTier(safeMessageId(messageIdRaw), tier);
-      }
 
       // -- #006: Routing transparency headers --
       const responseHeaders: Record<string, string> = {

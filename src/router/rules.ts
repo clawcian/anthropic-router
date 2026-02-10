@@ -34,7 +34,7 @@ function scoreKeywordMatch(
   thresholds: { low: number; high: number },
   scores: { none: number; low: number; high: number },
 ): DimensionScore {
-  const matches = keywords.filter((kw) => text.includes(kw.toLowerCase()));
+  const matches = keywords.filter((kw) => text.includes(kw));
   if (matches.length >= thresholds.high) {
     return {
       name,
@@ -191,10 +191,9 @@ export function classifyByRules(
   }
 
   // 2+ reasoning markers = force COMPLEX at high confidence
-  const reasoningMatches = config.reasoningKeywords.filter((kw) =>
-    userText.includes(kw.toLowerCase()),
-  );
-  if (reasoningMatches.length >= 2) {
+  // Reuse the reasoning dimension score (1.0 = high threshold met, i.e., 2+ matches)
+  const reasoningDim = dimensions.find((d) => d.name === "reasoningMarkers");
+  if (reasoningDim && reasoningDim.score >= 1.0) {
     const confidence = calibrateConfidence(
       Math.max(weightedScore, 0.3),
       config.confidenceSteepness,

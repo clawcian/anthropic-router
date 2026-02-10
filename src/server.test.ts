@@ -81,74 +81,20 @@ describe("buildConfig", () => {
 describe("createApp", () => {
   const testConfig: ProxyConfig = {
     port: 8403,
-    anthropicApiKey: "test-key",
-    proxySecret: "test-secret",
     routingConfig: buildConfig(),
     logEnabled: false,
     logPath: "/tmp/test-routing.jsonl",
   };
 
-  const authHeaders = {
-    Authorization: "Bearer test-secret",
-    "Content-Type": "application/json",
-  };
-
-  describe("authentication", () => {
-    it("allows /health without auth", async () => {
-      const app = createApp(testConfig);
-      const res = await app.request("/health");
-      expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ status: "ok" });
-    });
-
-    it("rejects unauthenticated requests to /test", async () => {
-      const app = createApp(testConfig);
-      const res = await app.request("/test", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: "hello" }),
-      });
-      expect(res.status).toBe(401);
-      const body = await res.json();
-      expect(body.error.type).toBe("authentication_error");
-    });
-
-    it("rejects unauthenticated requests to /v1/messages", async () => {
-      const app = createApp(testConfig);
-      const res = await app.request("/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: [{ role: "user", content: "hi" }] }),
-      });
-      expect(res.status).toBe(401);
-    });
-
-    it("rejects unauthenticated requests to /stats", async () => {
-      const app = createApp(testConfig);
-      const res = await app.request("/stats");
-      expect(res.status).toBe(401);
-    });
-
-    it("rejects wrong bearer token", async () => {
-      const app = createApp(testConfig);
-      const res = await app.request("/test", {
-        method: "POST",
-        headers: {
-          Authorization: "Bearer wrong-token",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ prompt: "hello" }),
-      });
-      expect(res.status).toBe(401);
-    });
-  });
-
   describe("GET /health", () => {
-    it("returns 200 with ok status", async () => {
+    it("returns 200 with ok status and plugin info", async () => {
       const app = createApp(testConfig);
       const res = await app.request("/health");
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ status: "ok" });
+      const body = await res.json();
+      expect(body.status).toBe("ok");
+      expect(body.plugin).toBe("anthropic-router");
+      expect(body.port).toBe(8403);
     });
   });
 
@@ -157,7 +103,7 @@ describe("createApp", () => {
       const app = createApp(testConfig);
       const res = await app.request("/test", {
         method: "POST",
-        headers: authHeaders,
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt: "what is 2+2?" }),
       });
       expect(res.status).toBe(200);
@@ -174,7 +120,7 @@ describe("createApp", () => {
       const app = createApp(testConfig);
       const res = await app.request("/test", {
         method: "POST",
-        headers: authHeaders,
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt: "hello" }),
       });
       const body = await res.json();
@@ -185,7 +131,7 @@ describe("createApp", () => {
       const app = createApp(testConfig);
       const res = await app.request("/test", {
         method: "POST",
-        headers: authHeaders,
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           prompt: "do the thing",
           system: "you are a distributed systems architect",
@@ -201,7 +147,7 @@ describe("createApp", () => {
       const app = createApp(testConfig);
       const res = await app.request("/v1/messages", {
         method: "POST",
-        headers: authHeaders,
+        headers: { "Content-Type": "application/json" },
         body: "not json",
       });
       expect(res.status).toBe(400);
@@ -213,7 +159,7 @@ describe("createApp", () => {
       const app = createApp(testConfig);
       const res = await app.request("/v1/messages", {
         method: "POST",
-        headers: authHeaders,
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model: "claude-sonnet-4-5-20250929" }),
       });
       expect(res.status).toBe(400);
@@ -224,37 +170,63 @@ describe("createApp", () => {
       const app = createApp(testConfig);
       const res = await app.request("/v1/messages", {
         method: "POST",
-        headers: authHeaders,
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: "not an array" }),
       });
       expect(res.status).toBe(400);
     });
+
+    it("returns 401 when x-api-key header is missing and no fallback key", async () => {
+      const app = createApp(testConfig); // no anthropicApiKey set
+      const res = await app.request("/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [{ role: "user", content: "hello" }],
+        }),
+      });
+      expect(res.status).toBe(401);
+      const body = await res.json();
+      expect(body.error.type).toBe("authentication_error");
+      expect(body.error.message).toContain("x-api-key");
+    });
+
+    it("does not return proxy auth error when fallback anthropicApiKey is set", async () => {
+      // When anthropicApiKey is configured, the proxy should NOT return its own
+      // "Missing x-api-key" error — it should attempt the upstream call instead.
+      // The upstream call may fail (invalid key), but it won't be OUR auth error.
+      const appWithKey = createApp({
+        ...testConfig,
+        anthropicApiKey: "test-fallback-key",
+      });
+      const res = await appWithKey.request("/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [{ role: "user", content: "hello" }],
+        }),
+      });
+      const body = await res.json();
+      // If we get a 401, it should be from Anthropic upstream (not our proxy).
+      // Our proxy error says "Missing x-api-key header. Ensure you are logged into Claude Code."
+      // Anthropic upstream says "invalid x-api-key" — different message.
+      if (res.status === 401) {
+        expect(body.error?.message ?? "").not.toContain("Missing x-api-key header");
+      }
+    });
   });
 
   describe("GET /stats", () => {
-    it("returns 400 when logging is disabled", async () => {
-      const app = createApp(testConfig); // logEnabled: false
-      const res = await app.request("/stats", {
-        headers: { Authorization: "Bearer test-secret" },
-      });
-      expect(res.status).toBe(400);
-      expect((await res.json()).error.type).toBe("invalid_request");
-    });
-
-    it("returns empty stats when log file does not exist", async () => {
-      const app = createApp({
-        ...testConfig,
-        logEnabled: true,
-        logPath: "/tmp/nonexistent-test-log-" + Date.now() + ".jsonl",
-      });
-      const res = await app.request("/stats", {
-        headers: { Authorization: "Bearer test-secret" },
-      });
+    it("returns empty stats on fresh app instance", async () => {
+      const app = createApp(testConfig);
+      const res = await app.request("/stats");
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.totalRequests).toBe(0);
       expect(body.tierDistribution).toEqual({});
       expect(body.modelDistribution).toEqual({});
+      expect(body.averageTokens).toBe(0);
+      expect(body.averageConfidence).toBe(0);
     });
   });
 
@@ -263,7 +235,7 @@ describe("createApp", () => {
       const app = createApp(testConfig);
       const res = await app.request("/v1/messages", {
         method: "POST",
-        headers: authHeaders,
+        headers: { "Content-Type": "application/json" },
         body: "not json",
       });
       const body = await res.json();
@@ -277,7 +249,7 @@ describe("createApp", () => {
       const app = createApp(testConfig);
       const res = await app.request("/v1/messages", {
         method: "POST",
-        headers: authHeaders,
+        headers: { "Content-Type": "application/json" },
         body: "not json",
       });
       const body = await res.json();

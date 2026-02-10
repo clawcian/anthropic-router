@@ -29,11 +29,25 @@
     "type": "git",
     "url": "git+https://github.com/lucianHymer/anthropic-router.git"
   },
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
   "files": [
     "dist",
+    "openclaw.plugin.json",
     "README.md",
     "LICENSE"
   ],
+  "peerDependencies": {
+    "openclaw": ">=2025.1.0"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
   "dependencies": {
     "@hono/node-server": "^1.0.0",
     "hono": "^4.0.0"

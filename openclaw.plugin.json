@@ -1,0 +1,18 @@
+{
+  "id": "anthropic-router",
+  "name": "Anthropic Router",
+  "description": "Smart routing — automatically selects cheapest capable Anthropic model per request",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "port": {
+        "type": "number",
+        "description": "Proxy port (default: 8403)"
+      },
+      "forceModel": {
+        "type": "string",
+        "description": "Override routing and force a specific model (for testing)"
+      }
+    }
+  }
+}

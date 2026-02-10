@@ -15,7 +15,7 @@ export const DEFAULT_ROUTING_CONFIG: RoutingConfig = {
     tokenCountThresholds: { simple: 50, complex: 500 },
 
     codeKeywords: [
-      "function", "class", "import", "def", "SELECT", "async", "await",
+      "function", "class", "import", "def", "select", "async", "await",
       "const", "let", "var", "return", "```",
       // Chinese
       "函数", "类", "导入", "定义", "查询", "异步",
